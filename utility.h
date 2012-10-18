@@ -7,6 +7,8 @@
 
 #define UTILITY_H
 
+#include "list.h"
+
 #define MAX_LOG_LEN 1024
 
 enum LogLevel{
@@ -49,16 +51,10 @@ void free_linked_list(struct LinkedList * list);
 // Get current time and format it into string
 int get_time(char * buf, int buf_size);
 
-// listen on port and return the listen fd
+// listen on TCP port and return the listen fd
 int get_listen_fd(int port);
 
-// Get the file type according to the file name's extension part
-void get_filetype(char * file_name, char * file_type);
-
-#define MAX_ENV_CNT 25
-
-extern char * ENVP[];
-
-int match_envp(struct LinkedList * l, char * args[]);
+// bind on UDP port and return the listen fd
+int get_udp_listen_fd(int port);
 
 #endif

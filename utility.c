@@ -204,104 +204,25 @@ int get_listen_fd(int port){
     return sock;
 }
 
-void get_filetype(char * file_name, char * file_type){
-	int n = strlen(file_name);
+int get_udp_listen_fd(int port){
+    int sockfd;
+    struct sockaddr_in serv_addr;
 
-	if(strcasecmp(file_name + n - strlen(".html"), ".html") == 0){
-		strcpy(file_type, "text/html");
-	}else if(strcasecmp(file_name + n - strlen(".css"), ".css") == 0){
-		strcpy(file_type, "text/css");
-	}else if(strcasecmp(file_name + n - strlen(".png"), ".png") == 0){
-		strcpy(file_type, "image/png");
-	}else if(strcasecmp(file_name + n - strlen(".jpg"), ".jpg") == 0){
-		strcpy(file_type, "image/jpeg");
-	}else if(strcasecmp(file_name + n - strlen(".gif"), ".gif") == 0){
-		strcpy(file_type, "image/gif");
-	}else{
-		strcpy(file_type, "text/plain");
-	}
-}
-
-char* ENVP[] = {
-    "QUERY_STRING=",
-    "REMOTE_ADDR=",
-    "REQUEST_METHOD=",
-    "REQUEST_URI=",
-    "SCRIPT_NAME=",
-    "SERVER_PORT=",
-    "GATEWAY_INTERFACE=CGI/1.1",
-    "SERVER_PROTOCOL=HTTP/1.1",
-    "SERVER_SOFTWARE=Liso/1.0",
-    "CONTENT_LENGTH=",
-    "CONTENT_TYPE=",
-    "HTTP_ACCEPT_ENCODING=",
-    "HTTP_ACCEPT_LANGUAGE=",
-    "HTTP_ACCEPT_CHARSET=",
-    "HTTP_ACCEPT=",
-    "HTTP_REFERER=",
-    "HTTP_HOST=",
-    "HTTP_COOKIE=",
-    "HTTP_USER_AGENT=",
-    "HTTP_CONNECTION=",
-    NULL
-};
-
-char* ENVP_C[] = {
-    "QUERY-STRING",
-    "REMOTE-ADDR",
-    "REQUEST-METHOD",
-    "REQUEST-URI",
-    "SCRIPT-NAME",
-    "SERVER-PORT",
-    "GATEWAY-INTERFACE=CGI/1.1",
-    "SERVER-PROTOCOL=HTTP/1.1",
-    "SERVER-SOFTWARE=Liso/1.0",
-    "CONTENT-LENGTH",
-    "CONTENT-TYPE",
-    "ACCEPT-ENCODING",
-    "ACCEPT-LANGUAGE",
-    "ACCEPT-CHARSET",
-    "ACCEPT",
-    "REFERER",
-    "HOST",
-    "COOKIE",
-    "USER-AGENT",
-    "CONNECTION",
-    NULL
-};
-
-int match_envp(struct LinkedList * l, char * args[]){
-    static int matched[MAX_ENV_CNT];
-
-    int i=0;
-    write_log(INFO, "match envp");
-    memset(matched, 0, sizeof(matched));
-    struct LinkedListNode * p;
-    int last_arg = 9;
-    for(p=l->head; p!=NULL; p=p->next){
-        for(i=0; ENVP_C[i] != NULL; ++i){
-            if(matched[i])
-                continue;
-            if(strncasecmp((char *)p->data, ENVP_C[i], strlen(ENVP_C[i])) == 0){
-                matched[i] = 1;
-                
-                char * sep = strchr((char *)p->data, ':') + 1;
-                while(*sep == ' ') ++ sep;
-
-                
-                int n = strlen(sep);
-                n += strlen(ENVP[i]);
-                args[last_arg] = malloc(n + 1);
-                strcpy(args[last_arg], ENVP[i]);
-                strcat(args[last_arg], sep);
-                printf("matched: from %s get: %s final %s\n", (char *)p->data, sep, args[last_arg]);
-                ++last_arg;
-                break;
-            }
-        }
-        if(ENVP_C[i] == NULL)
-            printf("unmatched: %s\n", (char *)p->data);
+    // setup the socket
+    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if(sockfd < 0) {
+        printf("error on socket() call");
+        return -1;
     }
 
-    return 0;
+    // Setup the server address and bind to it
+    memset(&serv_addr, '\0', sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+    serv_addr.sin_port = htons(port);
+    if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+        printf("error binding socket\n");
+        return -1;
+    }
+    return sockfd;
 }

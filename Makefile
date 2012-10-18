@@ -1,18 +1,25 @@
 # Makefile for liso HTTP Server
 # by Yu Su <ysu1@andrew.cmu.edu>
 
-CFLAGS=-Wall -Werror
+CC              = gcc
+LD              = gcc
+CFLAGS          = -Wall -Werror
+
+LDFLAGS         =
+DEFS            =
+LIB             = 
 
 all: routed
 
 utility: utility.c utility.h
-	@gcc ${CFLAGS} utility.c -c -o utility.o
+	$(CC) $(DEFS) $(CFLAGS) utility.c -c -o utility.o
 
 rd: rd.c rd.h
-	@gcc ${CFLAGS} rd.c -c -o rd.o
+	$(CC) $(DEFS) $(CFLAGS) rd.c -c -o rd.o
 
 routed: routed.c rd utility
-	@gcc ${CFLAGS} routed.c rd.o utility.o -o routed
+	$(CC) $(DEFS) $(CFLAGS) routed.c -c -o routed.o
+	$(LD) $(LDFLAGS) -o $@ rd.o utility.o routed.o $(LIB)
 
 clean:
-	@rm *.o routed
+	rm *.o routed
