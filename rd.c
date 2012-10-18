@@ -9,126 +9,6 @@
 #include <sys/mman.h>
 #include <arpa/inet.h>
 #include "rd.h"
-#include "utility.h"
-
-#define BUF_SIZE 8192
-
-// linked list for id
-struct id_list{
-    int id;
-    struct list_head list;
-};
-
-// linked list for string
-struct str_list{
-    char * str;
-    struct list_head list;
-};
-void free_str_list(struct str_list * list);
-
-// Link State data structure
-struct LSA{
-    int version, ttl, type;
-    int sender_id, seq_num;
-    int n_entries, n_objects;
-    struct id_list entries;
-    struct str_list objects;
-};
-struct LSA * parse_LSA(char * buf, int len);
-void free_LSA(struct LSA * lsa);
-
-// all info belongs to a node
-struct NodeInfo{
-    // basic
-    int node_id;
-    char * hostname;
-    int rport, sport, lport;
-
-    // routing info
-    int next_hop;
-    int distance;
-
-    // timeout
-    int last_lsa;
-    int ack_count_down;
-
-    // last received LSA
-    struct LSA * lsa;
-
-    // linked list of NodeInfo
-    struct list_head list;
-};
-
-// every object has a linked list of node containing it
-struct ObjectInfo{
-    char * name;
-
-    // which node have this object
-    struct id_list nodes;
-
-    // linked list
-    struct list_head list;
-};
-
-struct LocalObject{
-    char * name;
-    char * path;
-
-    struct list_head list;
-};
-
-// all info of a routing daemon
-struct RouteDaemon{
-    int node_id;
-
-    // how long would my LSA be re-flooded
-    int adv_timeout;
-    // how long a neighbor would be treated as down
-    int neighbor_timeout;
-    // how long to wait for retransmitting LSA again if ACK is not received
-    int retran_timeout;
-    // how long a outside-LSA would expire
-    int lsa_timeout;
-
-    // initial config
-    char * config_file;
-    char * file_list;
-
-    // ports for communicate with peer daemon and flask app
-    int rport, sport, lport;
-
-    // linked list of all known objects
-    struct ObjectInfo objects;
-
-    // linked list of all known routing daemons, includes mine
-    struct NodeInfo nodes;
-
-    // my link state
-    struct LSA * lsa;
-
-    // neighbors
-    struct NodeInfo neighbors;
-
-    // all local objects
-    struct LocalObject local_objects;
-
-    // fd mask for select()
-    int max_fd;
-    fd_set ready_read_set;
-    fd_set read_set;
-    int ready_cnt;
-
-    // tcp connection from flask app
-    int conn_fd[MAX_CONNECT];
-    // read buffer for tcp connection
-    struct ReadBuffer * connect_buf[MAX_CONNECT];
-
-    // for accepting tcp connection from flask app
-    int local_fd;
-    // listening udp port
-    int routing_fd;
-};
-
 
 int handle_timeout(struct RouteDaemon * rd);
 int handle_new_cgi_conn(struct RouteDaemon * rd);
@@ -250,6 +130,27 @@ int handle_new_cgi_conn(struct RouteDaemon * rd){
 }
 
 int handle_LSA(struct RouteDaemon * rd){
+    static char buf[BUF_SIZE];
+
+    if(rd->ready_cnt <= 0)
+        return 0;
+
+    struct sockaddr_in cli_addr;
+    socklen_t cli_len = sizeof(cli_addr);
+
+    if(FD_ISSET(rd->routing_fd, & rd->ready_read_set)){
+        FD_CLR(rd->routing_fd, & rd->ready_read_set);
+        int cnt = recvfrom(rd->routing_fd, buf, BUF_SIZE, 0, (struct sockaddr *)&cli_addr, &cli_len);
+        struct LSA * newLSA = unmarshal_LSA(buf, cnt);
+        if(newLSA == NULL)
+            return 0;
+
+        write_log(INFO, "Got new LSA");
+        print_LSA(newLSA);
+        int len = marshal_LSA(newLSA, buf, BUF_SIZE);
+        sendto(rd->routing_fd, buf, len, 0, (struct sockaddr *)&cli_addr, sizeof(cli_addr));
+    }
+
     ///TODO: handle new LSA (update or echo-back)
     ///TODO: update: re-compute shortest path and flood
     ///TODO: echo-back: send neighbor's last LSA back
@@ -443,6 +344,90 @@ int parse_req(struct RouteDaemon * rd, char * buf, int len, int conn_id){
         add_local_object(rd, req.name, req.path);
         sprintf(rep, "OK 0\r\n");
         response_cgi(rd, conn_id, rep, strlen(rep));
+    }
+    return 0;
+}
+
+struct LSAParser{
+    char version, ttl;
+    short type;
+    int sender_id, seq_num;
+    int n_entries, n_objects;
+};
+
+int marshal_LSA(struct LSA * lsa, char * buf, int len){
+    struct LSAParser parser = * (struct LSAParser * )lsa;
+
+    int total_size = sizeof(struct LSAParser);
+    total_size += sizeof(int) * lsa->n_entries;
+    struct list_head *pos;
+    list_for_each(pos, &(lsa->objects.list)){
+        struct str_list * entry = list_entry(pos, struct str_list, list);
+        total_size += strlen(entry->str);
+    }
+    if(total_size > len)
+        return -1;
+
+    memcpy(buf, (char *) &parser, sizeof(struct LSAParser));
+
+    char * p = buf + sizeof(struct LSAParser);
+    list_for_each(pos, &(lsa->entries.list)){
+        struct id_list * entry = list_entry(pos, struct id_list, list);
+        memcpy(p, &entry->id, sizeof(entry->id));
+        p += sizeof(entry->id);
+    }
+
+    list_for_each(pos, &(lsa->objects.list)){
+        struct str_list * entry = list_entry(pos, struct str_list, list);
+        strcpy(p, entry->str);
+        p += strlen(entry->str);
+        * p = '\0';
+        ++ p;
+    }
+    return p - buf;
+}
+
+struct LSA * unmarshal_LSA(char * buf, int len){
+    struct LSAParser * parser = (struct LSAParser *) buf;
+    struct LSA * lsa = (struct LSA *) malloc(sizeof(struct LSA));
+    lsa->version = parser->version;
+    lsa->ttl = parser->ttl;
+    lsa->type = parser->type;
+    lsa->sender_id = parser->sender_id;
+    lsa->seq_num = parser->seq_num;
+    lsa->n_entries = parser->n_entries;
+    lsa->n_objects = parser->n_objects;
+    INIT_LIST_HEAD( & (lsa->entries.list));
+    INIT_LIST_HEAD( & (lsa->objects.list));
+    char * s = buf + sizeof(struct LSAParser);
+    int i;
+    for(i=0; i<lsa->n_entries; ++i){
+        struct id_list * n = (struct id_list *) malloc(sizeof(struct id_list));
+        n->id = * (int *) s;
+        s += sizeof(int);
+        list_add( & (n->list), & (lsa->entries.list));
+    }
+    for(i=0; i<lsa->n_objects; ++i){
+        struct str_list * n = (struct str_list *) malloc(sizeof(struct str_list));
+        n->str = strdup(s);
+        s += strlen(s) + 1;
+        list_add( & (n->list), & (lsa->objects.list));
+    }
+    return lsa;
+}
+
+int print_LSA(struct LSA * lsa){
+    printf("%d %d %d\n%d %d\n", lsa->version, lsa->ttl, lsa->type, lsa->n_entries, lsa->n_objects);
+    struct list_head *pos;
+    list_for_each(pos, &(lsa->entries.list)){
+        struct id_list * entry = list_entry(pos, struct id_list, list);
+        printf("%d ", entry->id);
+    }
+    printf("\n");
+
+    list_for_each(pos, &(lsa->objects.list)){
+        struct str_list * entry = list_entry(pos, struct str_list, list);
+        printf("%s\n", entry->str);
     }
     return 0;
 }
