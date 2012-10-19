@@ -3,7 +3,7 @@
 
 CC              = gcc
 LD              = gcc
-CFLAGS          = -Wall -Werror
+CFLAGS          = -Wall -Werror -g
 
 LDFLAGS         =
 DEFS            =

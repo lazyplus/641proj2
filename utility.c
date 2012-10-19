@@ -13,6 +13,9 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <ctype.h>
 #include "utility.h"
 
 static int log_fd = 0;
@@ -121,54 +124,40 @@ int read_cnt(struct ReadBuffer * rb, char * buf, int buf_cap, int cnt){
 	return cnt;
 }
 
-struct LinkedListNode{
-    void * data;
-    struct LinkedListNode * next;
-};
-
-struct LinkedList{
-    struct LinkedListNode * head, * tail;
-};
-
-struct LinkedList * get_linked_list(){
-    struct LinkedList * l = (struct LinkedList *) malloc(sizeof(struct LinkedList));
-    l->head = l->tail = NULL;
-    return l;
-}
-
-int insert_linked_list(struct LinkedList * list, void * data){
-    struct LinkedListNode * n = (struct LinkedListNode *) malloc(sizeof(struct LinkedListNode));
-    n->data = data;
-    n->next = NULL;
-    if(list->head == NULL){
-        list->head = list->tail = n;
-    } else {
-        list->tail->next = n;
-        list->tail = n;
+int read_token(struct ReadBuffer * rb, char * buf, int buf_cap, int token_mode){
+    int i;
+    for(i=0; i<rb->cnt; ++i){
+        if(!isspace(rb->buf[i]))
+            break;
     }
+    memmove(rb->buf, rb->buf + i, rb->cnt - i);
+    rb->cnt -= i;
+
+    for(i=0; i<rb->cnt; ++i)
+        if(isspace(rb->buf[i]))
+            break;
+
+    if(i == rb->cnt && token_mode != i)
+        return 0;
+
+    if(token_mode == 0){
+        if(!i)
+            return 0;
+        memcpy(buf, rb->buf, i);
+        buf[i] = '\0';
+        memmove(rb->buf, rb->buf + i + 1, rb->cnt - i - 1);
+        rb->cnt = rb->cnt - i - 1;
+        return i;
+    }else if(i >= token_mode){
+        i = token_mode;
+        memcpy(buf, rb->buf, i);
+        buf[i] = '\0';
+        memmove(rb->buf, rb->buf + i, rb->cnt - i);
+        rb->cnt = rb->cnt - i;
+        return i;
+    }
+
     return 0;
-}
-
-void * remove_linked_list(struct LinkedList * list){
-    if(list->head == NULL)
-        return NULL;
-
-    struct LinkedListNode * n = list->head;
-    list->head = n->next;
-    if(list->head == NULL)
-        list->tail = NULL;
-
-    void * data = n->data;
-    free(n);
-    return data;
-}
-
-void free_linked_list(struct LinkedList * list){
-    struct LinkedListNode * p;
-    while((p = remove_linked_list(list)) != NULL){
-        free(p);
-    }
-    free(list);
 }
 
 int get_time(char * buf, int buf_size){
@@ -225,4 +214,23 @@ int get_udp_listen_fd(int port){
         return -1;
     }
     return sockfd;
+}
+
+int send_packet(int sockfd, char * host, int port, char * payload, int len){
+    write_log(INFO, "sending to %s:%d %d", host, port, len);
+
+    struct sockaddr_in cli_addr;
+    struct hostent * h;
+
+    // Lets set up the structure for who we want to contact
+    if((h = gethostbyname(host))==NULL) {
+        printf("error resolving host\n");
+        return -1;
+    }
+
+    memset(&cli_addr, '\0', sizeof(cli_addr));
+    cli_addr.sin_family = AF_INET;
+    cli_addr.sin_addr.s_addr = *(in_addr_t *)h->h_addr;
+    cli_addr.sin_port = htons(port);
+    return sendto(sockfd, payload, len, 0, (struct sockaddr *)&cli_addr, sizeof(cli_addr));
 }

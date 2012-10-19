@@ -11,6 +11,8 @@
 
 #define MAX_LOG_LEN 1024
 
+#define SAFE_FREE(a) do{if(a)free(a); a = NULL;}while(0);
+
 enum LogLevel{
 	INFO, WARN, ERROR
 };
@@ -38,15 +40,7 @@ int read_line(struct ReadBuffer * rb, char * buf, int buf_cap);
 // Get a fixed-length content into user's buffer
 int read_cnt(struct ReadBuffer * rb, char * buf, int buf_cap, int cnt);
 
-struct LinkedList;
-
-struct LinkedList * get_linked_list();
-
-int insert_linked_list(struct LinkedList * list, void * data);
-
-void * remove_linked_list(struct LinkedList * list);
-
-void free_linked_list(struct LinkedList * list);
+int read_token(struct ReadBuffer * rb, char * buf, int buf_cap, int token_mode);
 
 // Get current time and format it into string
 int get_time(char * buf, int buf_size);
@@ -56,5 +50,7 @@ int get_listen_fd(int port);
 
 // bind on UDP port and return the listen fd
 int get_udp_listen_fd(int port);
+
+int send_packet(int sockfd, char * host, int port, char * payload, int len);
 
 #endif

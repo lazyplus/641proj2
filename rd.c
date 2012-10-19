@@ -58,6 +58,7 @@ struct RouteDaemon * get_new_rd(char ** config){
     sscanf(config[7], "%d", &rd->lsa_timeout);
 
     memset(rd->conn_fd, -1, sizeof(rd->conn_fd));
+    memset(rd->conn_req, 0, sizeof(rd->conn_req));
     INIT_LIST_HEAD( & rd->objects.list);
     INIT_LIST_HEAD( & rd->nodes.list);
     INIT_LIST_HEAD( & rd->neighbors.list);
@@ -107,7 +108,6 @@ int handle_timeout(struct RouteDaemon * rd){
 
 int add_cgi_conn(struct RouteDaemon * rd, int fd);
 int rm_cgi_conn(struct RouteDaemon * rd, int id);
-
 int handle_new_cgi_conn(struct RouteDaemon * rd){
     struct sockaddr_in cli_addr;
     socklen_t cli_size = sizeof(struct sockaddr_in);
@@ -129,6 +129,9 @@ int handle_new_cgi_conn(struct RouteDaemon * rd){
     return 0;
 }
 
+int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa);
+int get_ack(struct RouteDaemon * rd, char * host, int port);
+int update_LSA(struct RouteDaemon * rd, struct LSA * lsa);
 int handle_LSA(struct RouteDaemon * rd){
     static char buf[BUF_SIZE];
 
@@ -145,27 +148,44 @@ int handle_LSA(struct RouteDaemon * rd){
         if(newLSA == NULL)
             return 0;
 
-        write_log(INFO, "Got new LSA");
-        print_LSA(newLSA);
-        int len = marshal_LSA(newLSA, buf, BUF_SIZE);
-        sendto(rd->routing_fd, buf, len, 0, (struct sockaddr *)&cli_addr, sizeof(cli_addr));
+        write_log(INFO, "Got LSA from %s:%d", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
+
+        // if I just recovered from crash
+        if(newLSA->sender_id == rd->node_id){
+            if(newLSA->seq_num > rd->lsa->seq_num)
+                rd->lsa->seq_num = newLSA->seq_num;
+            free_LSA(newLSA);
+            return 0;
+        }
+
+        // An announcement 
+        if(newLSA->type == 0){
+            return update_LSA(rd, newLSA);
+        }
+        
+        // An ACK
+        if(newLSA->type == 1){
+            char * host = inet_ntoa(cli_addr.sin_addr);
+            int port = ntohs(cli_addr.sin_port);
+            return get_ack(rd, host, port);
+        }
+
+        write_log(INFO, "Unrecognized LSA");
+        // print_LSA(newLSA);
     }
-
-    ///TODO: handle new LSA (update or echo-back)
-    ///TODO: update: re-compute shortest path and flood
-    ///TODO: echo-back: send neighbor's last LSA back
-
-    ///TODO: handle ACK
     return 0;
 }
 
-int parse_req(struct RouteDaemon * rd, char * buf, int len, int conn_id);
-int handle_cgi_req(struct RouteDaemon * rd){
-    ///TODO: parse the input
-    ///TODO: lookup in local and remote
-    ///TODO: add new file and flood LSA
+int update_LSA(struct RouteDaemon * rd, struct LSA * lsa){
+    ///TODO: handle new LSA (update or echo-back)
+    ///TODO: update: re-compute shortest path and flood
+    ///TODO: echo-back: send neighbor's last LSA back
+    return 0;
+}
 
-    // code below: ugly local lookup, change it
+int feed_req(struct Request * req, char * buf, int len);
+int process_req(struct RouteDaemon * rd, int conn_id);
+int handle_cgi_req(struct RouteDaemon * rd){
     static char buf[BUF_SIZE];
     int i;
     for(i=0; i<MAX_CONNECT && rd->ready_cnt > 0; ++i){
@@ -175,15 +195,17 @@ int handle_cgi_req(struct RouteDaemon * rd){
         
         -- rd->ready_cnt;
         int ret_r, ret_parse = 0;
-        int ret_fill = fill_read_buffer(rd->connect_buf[i]);
+        int ret_fill = fill_read_buffer(rd->conn_buf[i]);
         write_log(INFO, "Read from connect_id %d bytes %d", i, ret_fill);
         if(ret_fill > 0){
             // In case one read gets more lines, loop here
             do{
-                ret_r = read_line(rd->connect_buf[i], buf, BUF_SIZE);
-
+                ret_r = read_token(rd->conn_buf[i], buf, BUF_SIZE, rd->conn_req[i].next_token_len);
                 if(ret_r > 0){
-                    ret_parse = parse_req(rd, buf, ret_r, i);
+                    ret_parse = feed_req( & rd->conn_req[i], buf, ret_r);
+                    if(ret_parse == 0 && rd->conn_req[i].state == FINISHED){
+                        process_req(rd, i);
+                    }
                 }
             }while(ret_r > 0 && ret_parse == 0);
         }
@@ -194,79 +216,77 @@ int handle_cgi_req(struct RouteDaemon * rd){
     return 0;
 }
 
-int add_neighbor(struct RouteDaemon * rd, char * line){
-    static int id, rport, lport, sport;
-    static char hostname[BUF_SIZE];
-
-    // write_log(INFO, "Adding Neighbor %s", line);
-    sscanf(line, "%d%s%d%d%d", &id, hostname, &rport, &lport, &sport);
-
-    if(id == rd->node_id){
-        rd->rport = rport;
-        rd->lport = lport;
-        rd->sport = sport;
-    }else{
-        struct NodeInfo * ni = (struct NodeInfo *) malloc(sizeof(struct NodeInfo));
-        ni->node_id = id;
-        ni->hostname = strdup(hostname);
-        ni->rport = rport;
-        ni->lport = lport;
-        ni->sport = sport;
-        list_add(&(ni->list), &(rd->neighbors.list));
+int feed_req(struct Request * req, char * buf, int len){
+    write_log(INFO, "get token %s", buf);
+    switch(req->state){
+    case CMD:
+        req->state = NL;
+        if(buf[0] == 'G')
+            req->type = GET;
+        else
+            req->type = ADD;
+        break;
+    case NL:
+        req->state = NAME;
+        sscanf(buf, "%d", &req->name_len);
+        req->next_token_len = req->name_len;
+        break;
+    case NAME:
+        SAFE_FREE(req->name);
+        req->name = strdup(buf);
+        if(req->type == GET)
+            req->state = FINISHED;
+        else
+            req->state = PL;
+        req->next_token_len = 0;
+        break;
+    case PL:
+        req->state = PATH;
+        sscanf(buf, "%d", &req->path_len);
+        req->next_token_len = req->path_len;
+        break;
+    case PATH:
+        SAFE_FREE(req->path);
+        req->path = strdup(buf);
+        req->state = FINISHED;
+        req->next_token_len = 0;
+        break;
+    default:
+        return 1;
     }
 
     return 0;
 }
 
-int add_local_object(struct RouteDaemon * rd, char * name, char * path){
-    struct LocalObject * lo = (struct LocalObject *) malloc(sizeof(struct LocalObject));
-    lo->name = strdup(name);
-    lo->path = strdup(path);
-    list_add(&(lo->list), &(rd->local_objects.list));
-    return 0;
-}
+int response_cgi(struct RouteDaemon * rd, int connection_id, char * buf, int len);
+int process_req(struct RouteDaemon * rd, int conn_id){
+    static char rep[BUF_SIZE], b[BUF_SIZE];
 
-int init_ports(struct RouteDaemon * rd){
-    rd->local_fd = get_listen_fd(rd->lport);
-    rd->routing_fd = get_udp_listen_fd(rd->rport);
+    struct Request * req = & rd->conn_req[conn_id];
+    req->state = CMD;
+    if(req->type == GET){
+        struct list_head * pos;
+        list_for_each(pos, &(rd->local_objects.list)){
+            struct LocalObject * tmp = list_entry(pos, struct LocalObject, list);
+            if(strcmp(tmp->name, req->name) == 0){
+                sprintf(b, "http://localhost:%d%s", rd->sport, tmp->path);
+                int len = strlen(b);
+                sprintf(rep, "OK %d %s", len, b);
+                response_cgi(rd, conn_id, rep, strlen(rep));
+                return 0;
+            }
+        }
+        ///TODO: look up in remote
 
-    write_log(INFO, "RD %p is listening on %d for TCP, %d for UDP", rd, rd->lport, rd->rport);
+        sprintf(rep, "NOTFOUND 0");
+        response_cgi(rd, conn_id, rep, strlen(rep));
+    }else{
+        add_local_object(rd, req->name, req->path);
+        sprintf(rep, "OK 0");
+        response_cgi(rd, conn_id, rep, strlen(rep));
 
-    rd->max_fd = rd->local_fd;
-    if(rd->max_fd < rd->routing_fd)
-        rd->max_fd = rd->routing_fd;
-
-    rd->ready_cnt = 0;
-    FD_ZERO( & rd->read_set);
-    FD_SET(rd->local_fd, & rd->read_set);
-    FD_SET(rd->routing_fd, & rd->read_set);
-    return 0;
-}
-
-int add_cgi_conn(struct RouteDaemon * rd, int fd){
-    int i;
-    for(i=0; i<MAX_CONNECT; ++i)
-        if(rd->conn_fd[i] == -1)
-            break;
-    if(i == MAX_CONNECT)
-        return -1;
-    
-    write_log(INFO, "New connection_id %d", i);
-    if(rd->max_fd < fd)
-        rd->max_fd = fd;
-
-    rd->conn_fd[i] = fd;
-    FD_SET(fd, & rd->read_set);
-    init_read_buffer( & rd->connect_buf[i], fd);
-    return i;
-}
-
-int rm_cgi_conn(struct RouteDaemon * rd, int id){
-    write_log(INFO, "Close connection_id %d", id);
-    close(rd->conn_fd[id]);
-    FD_CLR(rd->conn_fd[id], & rd->read_set);
-    free_read_buffer( & rd->connect_buf[id]);
-    rd->conn_fd[id] = -1;
+        ///TODO: update self-LSA and flood it
+    }
     return 0;
 }
 
@@ -282,68 +302,6 @@ int response_cgi(struct RouteDaemon * rd, int connection_id, char * buf, int len
             return -1;
         remain -= ret;
         pos += ret;
-    }
-    return 0;
-}
-
-struct Request{
-    char * cmd;
-    char * name;
-    char * path;
-};
-
-int split_req(char * buf, int len, struct Request * req){
-    // printf("spliting %s\n", buf);
-    req->cmd = buf;
-    char * p = buf;
-    while(*p != ' ') ++p;
-    int name_len;
-    sscanf(++p, "%d", &name_len);
-    while(*p >= '0' && *p <= '9') ++p;
-    // printf("name %d %.*s\n", name_len, name_len, p+1);
-    req->name = ++p;
-    p = p + name_len;
-    *p = 0;
-    if(p >= len + buf)
-        return 0;
-    int path_len;
-    sscanf(++p, "%d", &path_len);
-    while(*p >= '0' && *p <= '9') ++p;
-    // printf("path %d %.*s\n", path_len, path_len, p+1);
-    req->path = ++p;
-    p = p + path_len;
-    *p = 0;
-    return 0;
-}
-
-int parse_req(struct RouteDaemon * rd, char * buf, int len, int conn_id){
-    static char rep[BUF_SIZE], b[BUF_SIZE];
-
-    struct Request req;
-    buf[len-2] = 0;
-    split_req(buf, len-2, &req);
-
-    if(strncmp(req.cmd, "GETRD", strlen("GETRD")) == 0){
-        int namelen;
-        sscanf(buf + strlen("GETRD"), "%d", &namelen);
-
-        struct list_head *pos;
-        list_for_each(pos, &(rd->local_objects.list)){
-            struct LocalObject * tmp = list_entry(pos, struct LocalObject, list);
-            if(strcmp(tmp->name, req.name) == 0){
-                sprintf(b, "http://localhost:%d%s\r\n", rd->sport, tmp->path);
-                int len = strlen(b);
-                sprintf(rep, "OK %d %s", len, b);
-                response_cgi(rd, conn_id, rep, strlen(rep));
-                return 0;
-            }
-        }
-        sprintf(rep, "NOTFOUND 0\r\n");
-        response_cgi(rd, conn_id, rep, strlen(rep));
-    }else if(strncmp(req.cmd, "ADDFILE", strlen("ADDFILE")) == 0){
-        add_local_object(rd, req.name, req.path);
-        sprintf(rep, "OK 0\r\n");
-        response_cgi(rd, conn_id, rep, strlen(rep));
     }
     return 0;
 }
@@ -428,6 +386,142 @@ int print_LSA(struct LSA * lsa){
     list_for_each(pos, &(lsa->objects.list)){
         struct str_list * entry = list_entry(pos, struct str_list, list);
         printf("%s\n", entry->str);
+    }
+    return 0;
+}
+
+int add_neighbor(struct RouteDaemon * rd, char * line){
+    static int id, rport, lport, sport;
+    static char hostname[BUF_SIZE];
+
+    // write_log(INFO, "Adding Neighbor %s", line);
+    sscanf(line, "%d%s%d%d%d", &id, hostname, &rport, &lport, &sport);
+
+    if(id == rd->node_id){
+        rd->rport = rport;
+        rd->lport = lport;
+        rd->sport = sport;
+    }else{
+        struct NodeInfo * ni = (struct NodeInfo *) malloc(sizeof(struct NodeInfo));
+        ni->node_id = id;
+        ni->hostname = strdup(hostname);
+        ni->rport = rport;
+        ni->lport = lport;
+        ni->sport = sport;
+        list_add(&(ni->list), &(rd->nodes.list));
+        struct id_list * nn = (struct id_list *) malloc(sizeof(struct id_list));
+        nn->id = id;
+        list_add(&(nn->list), &(rd->neighbors.list));
+    }
+
+    return 0;
+}
+
+int add_local_object(struct RouteDaemon * rd, char * name, char * path){
+    struct LocalObject * lo = (struct LocalObject *) malloc(sizeof(struct LocalObject));
+    lo->name = strdup(name);
+    lo->path = strdup(path);
+    list_add(&(lo->list), &(rd->local_objects.list));
+    return 0;
+}
+
+int init_ports(struct RouteDaemon * rd){
+    rd->local_fd = get_listen_fd(rd->lport);
+    rd->routing_fd = get_udp_listen_fd(rd->rport);
+
+    write_log(INFO, "RD %p is listening on %d for TCP, %d for UDP", rd, rd->lport, rd->rport);
+
+    rd->max_fd = rd->local_fd;
+    if(rd->max_fd < rd->routing_fd)
+        rd->max_fd = rd->routing_fd;
+
+    rd->ready_cnt = 0;
+    FD_ZERO( & rd->read_set);
+    FD_SET(rd->local_fd, & rd->read_set);
+    FD_SET(rd->routing_fd, & rd->read_set);
+    return 0;
+}
+
+int add_cgi_conn(struct RouteDaemon * rd, int fd){
+    int i;
+    for(i=0; i<MAX_CONNECT; ++i)
+        if(rd->conn_fd[i] == -1)
+            break;
+    if(i == MAX_CONNECT)
+        return -1;
+    
+    write_log(INFO, "New connection_id %d", i);
+    if(rd->max_fd < fd)
+        rd->max_fd = fd;
+
+    rd->conn_fd[i] = fd;
+    FD_SET(fd, & rd->read_set);
+    init_read_buffer( & rd->conn_buf[i], fd);
+    return i;
+}
+
+int rm_cgi_conn(struct RouteDaemon * rd, int id){
+    write_log(INFO, "Close connection_id %d", id);
+    close(rd->conn_fd[id]);
+    FD_CLR(rd->conn_fd[id], & rd->read_set);
+    free_read_buffer( & rd->conn_buf[id]);
+    rd->conn_fd[id] = -1;
+    return 0;
+}
+
+int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa){
+    static char buf[BUF_SIZE];
+
+    int len = marshal_LSA(lsa, buf, BUF_SIZE);
+    struct list_head * pos, * npos;
+
+    list_for_each(pos, & (rd->neighbors.list)){
+        struct id_list * e = list_entry(pos, struct id_list, list);
+        list_for_each(npos, & (rd->nodes.list)){
+            struct NodeInfo * ne = list_entry(npos, struct NodeInfo, list);
+            if(ne->node_id == e->id){
+                send_packet(rd->routing_fd, ne->hostname, ne->rport, buf, len);
+                ne->ack_count_down = rd->retran_timeout;
+            }
+        }
+    }
+    return 0;
+}
+
+void free_id_list(struct id_list * list){
+    struct list_head * pos, * q;
+    list_for_each_safe(pos, q, &list->list){
+         struct id_list * tmp = list_entry(pos, struct id_list, list);
+         list_del(pos);
+         free(tmp);
+    }
+}
+
+void free_str_list(struct str_list * list){
+    struct list_head * pos, * q;
+    list_for_each_safe(pos, q, &list->list){
+         struct str_list * tmp = list_entry(pos, struct str_list, list);
+         list_del(pos);
+         SAFE_FREE(tmp->str);
+         free(tmp);
+    }
+}
+
+void free_LSA(struct LSA * lsa){
+    free_str_list( & lsa->objects);
+    free_id_list( & lsa->entries);
+    free(lsa);
+}
+
+int get_ack(struct RouteDaemon * rd, char * host, int port){
+    struct list_head * pos;
+    list_for_each(pos, & (rd->nodes.list)){
+        struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
+
+        if(port == e->rport && strcmp(e->hostname, host) == 0){
+            e->ack_count_down = 0;
+            e->last_lsa = rd->neighbor_timeout;
+        }
     }
     return 0;
 }

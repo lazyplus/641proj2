@@ -13,6 +13,7 @@ struct id_list{
     int id;
     struct list_head list;
 };
+void free_id_list(struct id_list * list);
 
 // linked list for string
 struct str_list{
@@ -34,6 +35,27 @@ struct LSA * unmarshal_LSA(char * buf, int len);
 int marshal_LSA(struct LSA * lsa, char * buf, int len);
 int print_LSA(struct LSA * lsa);
 void free_LSA(struct LSA * lsa);
+
+struct Request{
+    enum{
+        GET,
+        ADD
+    }type;
+    int name_len;
+    char * name;
+    int path_len;
+    char * path;
+    enum{
+        CMD = 0,
+        NL,
+        NAME,
+        PL,
+        PATH,
+        FINISHED
+    }state;
+    int next_token_len;
+};
+void free_request(struct Request *r);
 
 // all info belongs to a node
 struct NodeInfo{
@@ -105,7 +127,7 @@ struct RouteDaemon{
     struct LSA * lsa;
 
     // neighbors
-    struct NodeInfo neighbors;
+    struct id_list neighbors;
 
     // all local objects
     struct LocalObject local_objects;
@@ -119,7 +141,8 @@ struct RouteDaemon{
     // tcp connection from flask app
     int conn_fd[MAX_CONNECT];
     // read buffer for tcp connection
-    struct ReadBuffer * connect_buf[MAX_CONNECT];
+    struct ReadBuffer * conn_buf[MAX_CONNECT];
+    struct Request conn_req[MAX_CONNECT];
 
     // for accepting tcp connection from flask app
     int local_fd;
