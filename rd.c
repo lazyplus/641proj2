@@ -99,10 +99,59 @@ int close_daemon(struct RouteDaemon * rd){
  * implementation details
  *******************************/
 
+int calc_OSPF(struct RouteDaemon * rd);
+
+int is_neighbor(struct RouteDaemon * rd, int id){
+    struct list_head * pos;
+    list_for_each(pos, &(rd->neighbors.list)){
+        struct id_list * e = list_entry(pos, struct id_list, list);
+        if(e->id == id)
+            return 1;
+    }
+    return 0;
+}
+
+int send_LSA(struct RouteDaemon * rd, struct LSA * lsa, char * host, int port);
+int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa, int except_id);
 int handle_timeout(struct RouteDaemon * rd){
-    /// TODO: resend LSA to neighbors didn't response ACK
-    /// TODO: expire too old LSA and announce the expiration
-    /// TODO: delete too old LSA after all neighbors responded ACK
+    struct list_head * pos;
+
+    /// resend LSA to neighbors didn't response ACK
+    list_for_each(pos, &(rd->nodes.list)){
+        struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
+
+        if(!is_neighbor(rd, e->node_id))
+            continue;
+
+        struct list_head * pos2;
+        list_for_each(pos2, &(e->ack.list)){
+            struct ACKCD * ae = list_entry(pos2, struct ACKCD, list);
+            if(ae->ack_count_down > 0){
+                if(-- ae->ack_count_down == 0){
+                    send_LSA(rd, ae->lsa, e->hostname, e->rport);
+                    ae->ack_count_down = rd->retran_timeout;
+                }
+            }
+        }
+    }
+
+    /// expire too old neighbor LSA and announce the expiration
+    /// delete too old LSA after all neighbors responded ACK (in get_ack)
+    struct list_head * q;
+    list_for_each_safe(pos, q, &(rd->nodes.list)){
+        struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
+        if(e->last_lsa > 0){
+            if(-- e->last_lsa == 0){
+                list_del(pos);
+                calc_OSPF(rd);
+                if(is_neighbor(rd, e->node_id)){
+                    e->lsa->ttl = 0;
+                    flood_LSA(rd, e->lsa, e->node_id);
+                }
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -129,9 +178,10 @@ int handle_new_cgi_conn(struct RouteDaemon * rd){
     return 0;
 }
 
-int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa);
-int get_ack(struct RouteDaemon * rd, char * host, int port);
-int update_LSA(struct RouteDaemon * rd, struct LSA * lsa);
+int get_id(struct RouteDaemon * rd, char * host, int port);
+int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa, int except_id);
+int get_ack(struct RouteDaemon * rd, struct LSA * lsa, int from);
+int update_LSA(struct RouteDaemon * rd, struct LSA * lsa, int from);
 int handle_LSA(struct RouteDaemon * rd){
     static char buf[BUF_SIZE];
 
@@ -158,20 +208,23 @@ int handle_LSA(struct RouteDaemon * rd){
             return 0;
         }
 
+        int node_id = get_id(inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
+        if(node_id == -1){
+            write_log(WARN, "LSA from unknown peer %s:%d", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
+            return 0;
+        }
+
         // An announcement 
         if(newLSA->type == 0){
-            return update_LSA(rd, newLSA);
+            return update_LSA(rd, newLSA, node_id);
         }
         
         // An ACK
         if(newLSA->type == 1){
-            char * host = inet_ntoa(cli_addr.sin_addr);
-            int port = ntohs(cli_addr.sin_port);
-            return get_ack(rd, host, port);
+            return get_ack(rd, newLSA, node_id);
         }
 
         write_log(INFO, "Unrecognized LSA");
-        // print_LSA(newLSA);
     }
     return 0;
 }
@@ -469,20 +522,40 @@ int rm_cgi_conn(struct RouteDaemon * rd, int id){
     return 0;
 }
 
-int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa){
+int send_LSA(struct RouteDaemon * rd, struct LSA * lsa, char * host, int port){
     static char buf[BUF_SIZE];
 
     int len = marshal_LSA(lsa, buf, BUF_SIZE);
-    struct list_head * pos, * npos;
+    return send_packet(rd->routing_fd, host, port, buf, len);
+}
 
-    list_for_each(pos, & (rd->neighbors.list)){
-        struct id_list * e = list_entry(pos, struct id_list, list);
-        list_for_each(npos, & (rd->nodes.list)){
-            struct NodeInfo * ne = list_entry(npos, struct NodeInfo, list);
-            if(ne->node_id == e->id){
-                send_packet(rd->routing_fd, ne->hostname, ne->rport, buf, len);
-                ne->ack_count_down = rd->retran_timeout;
+struct LSA * dup_LSA(struct LSA * lsa);
+
+int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa, int except_id){
+    struct list_head * pos, * apos;
+    list_for_each(pos, & (rd->nodes.list)){
+        struct NodeInfo * ne = list_entry(pos, struct NodeInfo, list);
+        if(ne->node_id == except_id || !is_neighbor(rd, ne->node_id))
+            continue;
+
+        int found = 0;
+        list_for_each(apos, & (ne->ack.list)){
+            struct ACKCD * ae = list_entry(apos, struct ACKCD, list);
+            if(ae->lsa->sender_id == lsa->sender_id){
+                free_LSA(ae->lsa);
+                ae->lsa = dup_LSA(lsa);
+                send_LSA(rd, ae->lsa, ne->hostname, ne->rport);
+                ae->ack_count_down = rd->retran_timeout;
+                found = 1;
             }
+        }
+        
+        if(!found){
+            struct ACKCD * ae = (struct ACKCD *) malloc(sizeof(struct ACKCD));
+            ae->lsa = dup_LSA(lsa);
+            ae->ack_count_down = rd->retran_timeout;
+            send_LSA(rd, ae->lsa, ne->hostname, ne->rport);
+            list_add( & (ae->list), & (ne->ack.list));
         }
     }
     return 0;
@@ -513,14 +586,39 @@ void free_LSA(struct LSA * lsa){
     free(lsa);
 }
 
-int get_ack(struct RouteDaemon * rd, char * host, int port){
+struct LSA * dup_LSA(struct LSA * lsa){
+    static char buf[BUF_SIZE];
+    int len = marshal_LSA(lsa, buf, BUF_SIZE);
+    return unmarshal_LSA(buf, len);
+}
+
+int get_id(struct RouteDaemon * rd, char * host, int port){
     struct list_head * pos;
     list_for_each(pos, & (rd->nodes.list)){
         struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
 
         if(port == e->rport && strcmp(e->hostname, host) == 0){
-            e->ack_count_down = 0;
-            e->last_lsa = rd->neighbor_timeout;
+            return e->node_id;
+        }
+    }
+    return -1;
+}
+
+int get_ack(struct RouteDaemon * rd, struct LSA * lsa, int from){
+    struct list_head * pos;
+    list_for_each(pos, & (rd->nodes.list)){
+        struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
+        if(e->node_id != from)
+            continue;
+
+        struct list_head * apos, * q;
+        list_for_each(apos, q, & (e->ack.list)){
+            struct ACKCD * ae = list_entry(apos, struct ACKCD, list);
+            if(ae->lsa->sender_id == lsa->sender_id){
+                list_del(apos);
+                free_LSA(ae->lsa);
+                free(ae);
+            }
         }
     }
     return 0;

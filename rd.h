@@ -57,6 +57,12 @@ struct Request{
 };
 void free_request(struct Request *r);
 
+struct ACKCD{
+    struct LSA * lsa;
+    int ack_count_down;
+    struct list_head list;
+};
+
 // all info belongs to a node
 struct NodeInfo{
     // basic
@@ -70,7 +76,7 @@ struct NodeInfo{
 
     // timeout
     int last_lsa;
-    int ack_count_down;
+    struct ACKCD ack;
 
     // last received LSA
     struct LSA * lsa;
