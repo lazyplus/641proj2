@@ -69,6 +69,7 @@ struct NodeInfo{
     int node_id;
     char * hostname;
     int rport, sport, lport;
+    int active;
 
     // routing info
     int next_hop;
@@ -131,6 +132,7 @@ struct RouteDaemon{
 
     // my link state
     struct LSA * lsa;
+    int announce_count_down;
 
     // neighbors
     struct id_list neighbors;

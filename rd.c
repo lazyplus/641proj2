@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <arpa/inet.h>
 #include "rd.h"
+#include "short_path.h"
 
 int handle_timeout(struct RouteDaemon * rd);
 int handle_new_cgi_conn(struct RouteDaemon * rd);
@@ -98,8 +99,11 @@ int close_daemon(struct RouteDaemon * rd){
 /********************************
  * implementation details
  *******************************/
-
-int calc_OSPF(struct RouteDaemon * rd);
+void shortest_path(struct RouteDaemon * rd);
+int calc_OSPF(struct RouteDaemon * rd){
+    shortest_path(rd);
+    return 0;
+}
 
 int is_neighbor(struct RouteDaemon * rd, int id){
     struct list_head * pos;
@@ -111,6 +115,7 @@ int is_neighbor(struct RouteDaemon * rd, int id){
     return 0;
 }
 
+int construct_LSA(struct RouteDaemon * rd);
 int send_LSA(struct RouteDaemon * rd, struct LSA * lsa, char * host, int port);
 int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa, int except_id);
 int handle_timeout(struct RouteDaemon * rd){
@@ -150,6 +155,13 @@ int handle_timeout(struct RouteDaemon * rd){
                 }
             }
         }
+    }
+
+    /// announce my LSA
+    if(-- rd->announce_count_down == 0){
+        construct_LSA(rd);
+        flood_LSA(rd, rd->lsa, rd->node_id);
+        rd->announce_count_down = rd->adv_timeout;
     }
 
     return 0;
@@ -208,7 +220,7 @@ int handle_LSA(struct RouteDaemon * rd){
             return 0;
         }
 
-        int node_id = get_id(inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
+        int node_id = get_id(rd, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
         if(node_id == -1){
             write_log(WARN, "LSA from unknown peer %s:%d", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
             return 0;
@@ -229,7 +241,7 @@ int handle_LSA(struct RouteDaemon * rd){
     return 0;
 }
 
-int update_LSA(struct RouteDaemon * rd, struct LSA * lsa){
+int update_LSA(struct RouteDaemon * rd, struct LSA * lsa, int from){
     ///TODO: handle new LSA (update or echo-back)
     ///TODO: update: re-compute shortest path and flood
     ///TODO: echo-back: send neighbor's last LSA back
@@ -338,7 +350,9 @@ int process_req(struct RouteDaemon * rd, int conn_id){
         sprintf(rep, "OK 0");
         response_cgi(rd, conn_id, rep, strlen(rep));
 
-        ///TODO: update self-LSA and flood it
+        /// update self-LSA and flood it
+        construct_LSA(rd);
+        flood_LSA(rd, rd->lsa, rd->node_id);
     }
     return 0;
 }
@@ -461,6 +475,9 @@ int add_neighbor(struct RouteDaemon * rd, char * line){
         ni->rport = rport;
         ni->lport = lport;
         ni->sport = sport;
+        ni->next_hop = rd->node_id;
+        ni->distance = 1;
+        INIT_LIST_HEAD( & (ni->ack.list));
         list_add(&(ni->list), &(rd->nodes.list));
         struct id_list * nn = (struct id_list *) malloc(sizeof(struct id_list));
         nn->id = id;
@@ -612,7 +629,7 @@ int get_ack(struct RouteDaemon * rd, struct LSA * lsa, int from){
             continue;
 
         struct list_head * apos, * q;
-        list_for_each(apos, q, & (e->ack.list)){
+        list_for_each_safe(apos, q, & (e->ack.list)){
             struct ACKCD * ae = list_entry(apos, struct ACKCD, list);
             if(ae->lsa->sender_id == lsa->sender_id){
                 list_del(apos);
@@ -622,4 +639,75 @@ int get_ack(struct RouteDaemon * rd, struct LSA * lsa, int from){
         }
     }
     return 0;
+}
+
+int construct_LSA(struct RouteDaemon * rd){
+    int seq_num = rd->lsa->seq_num + 1;
+    free_LSA(rd->lsa);
+
+    rd->lsa = (struct LSA *) malloc(sizeof(struct LSA));
+    rd->lsa->version = 1;
+    rd->lsa->ttl = 32;
+    rd->lsa->type = 0;
+    rd->lsa->sender_id = rd->node_id;
+    rd->lsa->seq_num = seq_num;
+    rd->lsa->n_entries = 0;
+    rd->lsa->n_objects = 0;
+
+    struct list_head * pos;
+    list_for_each(pos, &(rd->nodes.list)){
+        struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
+        if(e->active == 0 || !is_neighbor(rd, e->node_id))
+            continue;
+
+        struct id_list * ne = (struct id_list *) malloc(sizeof(struct id_list));
+        ne->id = e->node_id;
+
+        ++ rd->lsa->n_entries;
+        list_add( & (ne->list), & (rd->lsa->entries.list));
+    }
+
+    list_for_each(pos, &(rd->local_objects.list)){
+        struct LocalObject * e = list_entry(pos, struct LocalObject, list);
+        struct str_list * ne = (struct str_list *) malloc(sizeof(struct str_list));
+        ne->str = strdup(e->name);
+        ++ rd->lsa->n_objects;
+        list_add( & (ne->list), & (rd->lsa->objects.list));
+    }
+    return 0;
+}
+
+void shortest_path(struct RouteDaemon * rd){
+    struct list_head *pos;
+    struct list_head *v_pos;
+    struct list_head *e_pos;
+    struct list_head *v_pos2;
+
+    list_for_each(pos, &(rd->nodes.list)){
+        // for each V
+        list_for_each(v_pos, &(rd->nodes.list)){
+            struct NodeInfo *iterator = list_entry(v_pos, struct NodeInfo, list);
+
+            if(iterator->active == 0)
+                continue;
+
+            // for each E
+            list_for_each(e_pos, &(iterator->lsa->entries.list)){
+                struct id_list *each_edge = list_entry(e_pos, struct id_list, list);
+                // find the corresponding V and compare the cost 
+                list_for_each(v_pos2, &(rd->nodes.list)){
+                    struct NodeInfo *iterator2 = list_entry(v_pos2, struct NodeInfo, list);
+                    if(each_edge->id == iterator2->node_id){
+                        if (iterator2->distance > iterator->distance + 1){
+                            // a better path found
+                            iterator2->distance = iterator->distance +1;
+                            iterator2->next_hop = iterator->next_hop;
+                        }
+                        // work down, leave
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
