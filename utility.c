@@ -217,7 +217,7 @@ int get_udp_listen_fd(int port){
 }
 
 int send_packet(int sockfd, char * host, int port, char * payload, int len){
-    write_log(INFO, "sending to %s:%d %d", host, port, len);
+    // write_log(INFO, "sending to %s:%d %d", host, port, len);
 
     struct sockaddr_in cli_addr;
     struct hostent * h;

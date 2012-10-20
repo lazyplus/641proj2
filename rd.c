@@ -9,7 +9,6 @@
 #include <sys/mman.h>
 #include <arpa/inet.h>
 #include "rd.h"
-#include "short_path.h"
 
 int handle_timeout(struct RouteDaemon * rd);
 int handle_new_cgi_conn(struct RouteDaemon * rd);
@@ -80,6 +79,8 @@ struct RouteDaemon * get_new_rd(char ** config){
 
     init_ports(rd);
 
+    rd->announce_count_down = 1;
+
     write_log(INFO, "Allocated new routing daemon at %p", rd);
     return rd;
 }
@@ -125,7 +126,7 @@ int handle_timeout(struct RouteDaemon * rd){
     list_for_each(pos, &(rd->nodes.list)){
         struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
 
-        if(!is_neighbor(rd, e->node_id))
+        if(!is_neighbor(rd, e->node_id) || e->active == 0)
             continue;
 
         struct list_head * pos2;
@@ -133,6 +134,7 @@ int handle_timeout(struct RouteDaemon * rd){
             struct ACKCD * ae = list_entry(pos2, struct ACKCD, list);
             if(ae->ack_count_down > 0){
                 if(-- ae->ack_count_down == 0){
+                    write_log(INFO, "Retransmit to node %d of %d", e->node_id, ae->lsa->sender_id);
                     send_LSA(rd, ae->lsa, e->hostname, e->rport);
                     ae->ack_count_down = rd->retran_timeout;
                 }
@@ -147,9 +149,10 @@ int handle_timeout(struct RouteDaemon * rd){
         struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
         if(e->last_lsa > 0){
             if(-- e->last_lsa == 0){
-                list_del(pos);
+                // list_del(pos);
+                e->active = 0;
                 calc_OSPF(rd);
-                if(is_neighbor(rd, e->node_id)){
+                if(is_neighbor(rd, e->node_id) && e->lsa != NULL){
                     e->lsa->ttl = 0;
                     flood_LSA(rd, e->lsa, e->node_id);
                 }
@@ -210,15 +213,15 @@ int handle_LSA(struct RouteDaemon * rd){
         if(newLSA == NULL)
             return 0;
 
-        write_log(INFO, "Got LSA from %s:%d", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
-
-        // if I just recovered from crash
-        if(newLSA->sender_id == rd->node_id){
-            if(newLSA->seq_num > rd->lsa->seq_num)
-                rd->lsa->seq_num = newLSA->seq_num;
-            free_LSA(newLSA);
-            return 0;
+        if(newLSA->type == 0){
+            newLSA->type = 1;
+            // write_log(INFO, "Sending ACK to %d for %d", get_id(rd, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port)), newLSA->sender_id);
+            send_LSA(rd, newLSA, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
+            newLSA->type = 0;
         }
+
+        write_log(INFO, "Got LSA from %s:%d", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
+        // print_LSA(newLSA);
 
         int node_id = get_id(rd, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
         if(node_id == -1){
@@ -226,14 +229,23 @@ int handle_LSA(struct RouteDaemon * rd){
             return 0;
         }
 
+        // An ACK
+        if(newLSA->type == 1){
+            get_ack(rd, newLSA, node_id);
+
+            // if I just recovered from crash
+            if(newLSA->sender_id == rd->node_id){
+                if(newLSA->seq_num > rd->lsa->seq_num)
+                    rd->lsa->seq_num = newLSA->seq_num;
+            }
+
+            free_LSA(newLSA);
+            return 0;
+        }
+
         // An announcement 
         if(newLSA->type == 0){
             return update_LSA(rd, newLSA, node_id);
-        }
-        
-        // An ACK
-        if(newLSA->type == 1){
-            return get_ack(rd, newLSA, node_id);
         }
 
         write_log(INFO, "Unrecognized LSA");
@@ -256,11 +268,12 @@ int update_LSA(struct RouteDaemon * rd, struct LSA * lsa, int from){
             break;
         }
     }
+
     if(f_found){
-        if(!iterator->lsa->active){
-            iterator->lsa->active = 1;
+        if(!iterator->active){
+            iterator->active = 1;
         }
-        if(lsa->seq_num > iterator->lsa->seq_num){
+        if(iterator->lsa == NULL || lsa->seq_num > iterator->lsa->seq_num){
             // update lsa
             free_LSA(iterator->lsa);
             iterator->lsa = lsa;
@@ -276,14 +289,14 @@ int update_LSA(struct RouteDaemon * rd, struct LSA * lsa, int from){
         }
     }else{
         // New node, add to the nodes list
-        struct NodeInfo *new_node = (struct Nodeinfo*)malloc(sizeof(struct NodeInfo));
+        struct NodeInfo *new_node = (struct NodeInfo *)malloc(sizeof(struct NodeInfo));
         new_node->node_id = lsa->sender_id;
         new_node->last_lsa = rd->lsa_timeout;
         new_node->distance = 32;
         new_node->lsa = lsa;
         list_add(&(new_node->list), &(rd->nodes.list));
         // generate shortest path and object table
-        calc_OSFP(rd);
+        calc_OSPF(rd);
     }
     return 0;
 }
@@ -482,7 +495,7 @@ struct LSA * unmarshal_LSA(char * buf, int len){
 }
 
 int print_LSA(struct LSA * lsa){
-    printf("%d %d %d\n%d %d\n", lsa->version, lsa->ttl, lsa->type, lsa->n_entries, lsa->n_objects);
+    printf("%d %d %d\n%d %d\n%d %d\n", lsa->version, lsa->ttl, lsa->type, lsa->sender_id, lsa->seq_num, lsa->n_entries, lsa->n_objects);
     struct list_head *pos;
     list_for_each(pos, &(lsa->entries.list)){
         struct id_list * entry = list_entry(pos, struct id_list, list);
@@ -517,6 +530,8 @@ int add_neighbor(struct RouteDaemon * rd, char * line){
         ni->sport = sport;
         ni->next_hop = rd->node_id;
         ni->distance = 1;
+        ni->active = 1;
+        ni->last_lsa = rd->neighbor_timeout;
         INIT_LIST_HEAD( & (ni->ack.list));
         list_add(&(ni->list), &(rd->nodes.list));
         struct id_list * nn = (struct id_list *) malloc(sizeof(struct id_list));
@@ -592,7 +607,7 @@ int flood_LSA(struct RouteDaemon * rd, struct LSA * lsa, int except_id){
     struct list_head * pos, * apos;
     list_for_each(pos, & (rd->nodes.list)){
         struct NodeInfo * ne = list_entry(pos, struct NodeInfo, list);
-        if(ne->node_id == except_id || !is_neighbor(rd, ne->node_id))
+        if(ne->node_id == except_id || !is_neighbor(rd, ne->node_id) || ne->active == 0)
             continue;
 
         int found = 0;
@@ -638,6 +653,8 @@ void free_str_list(struct str_list * list){
 }
 
 void free_LSA(struct LSA * lsa){
+    if(lsa == NULL)
+        return;
     free_str_list( & lsa->objects);
     free_id_list( & lsa->entries);
     free(lsa);
@@ -667,14 +684,16 @@ int get_ack(struct RouteDaemon * rd, struct LSA * lsa, int from){
         struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
         if(e->node_id != from)
             continue;
-
         struct list_head * apos, * q;
         list_for_each_safe(apos, q, & (e->ack.list)){
             struct ACKCD * ae = list_entry(apos, struct ACKCD, list);
             if(ae->lsa->sender_id == lsa->sender_id){
+                write_log(INFO, "Got ACK from %d for %d", from, lsa->sender_id);
                 list_del(apos);
                 free_LSA(ae->lsa);
                 free(ae);
+
+                e->last_lsa = rd->neighbor_timeout;
             }
         }
     }
@@ -682,7 +701,9 @@ int get_ack(struct RouteDaemon * rd, struct LSA * lsa, int from){
 }
 
 int construct_LSA(struct RouteDaemon * rd){
-    int seq_num = rd->lsa->seq_num + 1;
+    int seq_num = 0;
+    if(rd->lsa)
+        seq_num = rd->lsa->seq_num + 1;
     free_LSA(rd->lsa);
 
     rd->lsa = (struct LSA *) malloc(sizeof(struct LSA));
@@ -693,6 +714,8 @@ int construct_LSA(struct RouteDaemon * rd){
     rd->lsa->seq_num = seq_num;
     rd->lsa->n_entries = 0;
     rd->lsa->n_objects = 0;
+    INIT_LIST_HEAD( & (rd->lsa->entries.list));
+    INIT_LIST_HEAD( & (rd->lsa->objects.list));
 
     struct list_head * pos;
     list_for_each(pos, &(rd->nodes.list)){
@@ -729,6 +752,9 @@ void shortest_path(struct RouteDaemon * rd){
             struct NodeInfo *iterator = list_entry(v_pos, struct NodeInfo, list);
 
             if(iterator->active == 0)
+                continue;
+
+            if(iterator->lsa == NULL)
                 continue;
 
             // for each E
