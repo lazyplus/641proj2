@@ -101,8 +101,60 @@ int close_daemon(struct RouteDaemon * rd){
  * implementation details
  *******************************/
 void shortest_path(struct RouteDaemon * rd);
+void free_objects(struct ObjectInfo *objects){
+    struct list_head *pos;
+    list_for_each(pos, &(rd->objects.list)){
+        struct ObjectInfo *one_object = list_entry(pos, struct ObjectInfo, list);
+        free(one_object->name);
+        free_id_list(&(one_object->nodes));
+    }
+}
+
+// generate the shortest path and object table
 int calc_OSPF(struct RouteDaemon * rd){
     shortest_path(rd);
+    
+    struct list_head *pos_node;
+    struct list_head *pos_node_object;
+    struct list_head *pos_objects;
+    int found=0;
+    // delect the old table
+    free_objects(&(rd->objects));
+    // init the new table
+    INIT_LIST_HEAD(&(rd->objects.list)); 
+    list_for_each(pos_node, &(rd->nodes.list)){
+        // for every node
+        struct NodeInfo* node_iter = list_entry(pos_node, struct NodeInfo, list);
+        list_for_each(pos_node_object, &(node_iter->lsa->objects.list)){
+            // for every object
+            struct str_list* object_iter = list_entry(pos_node_object, struct str_list, list);
+            list_for_each(pos_objects, &(rd->objects.list)){
+                struct ObjectInfo* local_objects_iter = list_entry(pos_objects, struct ObjectInfo, list);
+                if (!strcmp(local_objects_iter->name, object_iter->str)){
+                    // object already exists
+                    found = 1;
+                    break;
+                }
+            }
+
+            if(found == 1){
+                //object already exists
+                // Add node id
+                struct id_list *new_id = (struct id_list*)malloc(sizeof(struct id_list));
+                new_id->id = node_iter->node_id;
+                list_add(&(new_id->list), &(local_objects_iter->id_list.list));
+            }else{
+                // new object
+                struct ObjectInfo * new_obj = (struct ObjectInfo*)malloc(sizeof(struct ObjectInfo));
+                new_obj->name = strdup(object_iter->str);
+                INIT_LIST_HEAD(&(new_obj->nodes.list));
+                struct id_list *first_node = (struct id_list*)malloc(sizeof(struct id_list));
+                first_node->id = node_iter->node_id;
+                list_add(&(first_node->list), &(new_obj->id_list.list));
+                list_add(&(new_obj.list), &(rd->objects.list));
+            }
+        }
+    }
     return 0;
 }
 
