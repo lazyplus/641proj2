@@ -245,6 +245,46 @@ int update_LSA(struct RouteDaemon * rd, struct LSA * lsa, int from){
     ///TODO: handle new LSA (update or echo-back)
     ///TODO: update: re-compute shortest path and flood
     ///TODO: echo-back: send neighbor's last LSA back
+    struct list_head *pos;
+    struct NodeInfo *iterator;
+    int f_found=0; 
+    // Check if it is from a new node
+    list_for_each(pos, &(rd->nodes.list)){
+        iterator = list_entry(pos, struct NodeInfo, list);
+        if(iterator->node_id == lsa->sender_id){
+            f_found = 1;
+            break;
+        }
+    }
+    if(f_found){
+        if(!iterator->lsa->active){
+            iterator->lsa->active = 1;
+        }
+        if(lsa->seq_num > iterator->lsa->seq_num){
+            // update lsa
+            free_LSA(iterator->lsa);
+            iterator->lsa = lsa;
+            iterator->last_lsa = rd->lsa_timeout;
+            // generate shortest path and object table
+            calc_OSPF(rd);
+        }else{
+            if(is_neighbor(rd, lsa->sender_id)){
+                // from neighbor, echo back
+                iterator->lsa->ttl = 32;
+                send_LSA(rd, iterator->lsa, iterator->hostname, iterator->rport);
+            }
+        }
+    }else{
+        // New node, add to the nodes list
+        struct NodeInfo *new_node = (struct Nodeinfo*)malloc(sizeof(struct NodeInfo));
+        new_node->node_id = lsa->sender_id;
+        new_node->last_lsa = rd->lsa_timeout;
+        new_node->distance = 32;
+        new_node->lsa = lsa;
+        list_add(&(new_node->list), &(rd->nodes.list));
+        // generate shortest path and object table
+        calc_OSFP(rd);
+    }
     return 0;
 }
 
