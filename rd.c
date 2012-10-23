@@ -103,7 +103,7 @@ int close_daemon(struct RouteDaemon * rd){
 void shortest_path(struct RouteDaemon * rd);
 void free_objects(struct ObjectInfo *objects){
     struct list_head *pos;
-    list_for_each(pos, &(rd->objects.list)){
+    list_for_each(pos, &(objects->list)){
         struct ObjectInfo *one_object = list_entry(pos, struct ObjectInfo, list);
         free(one_object->name);
         free_id_list(&(one_object->nodes));
@@ -125,11 +125,16 @@ int calc_OSPF(struct RouteDaemon * rd){
     list_for_each(pos_node, &(rd->nodes.list)){
         // for every node
         struct NodeInfo* node_iter = list_entry(pos_node, struct NodeInfo, list);
+
+        if(node_iter->lsa == NULL || node_iter->active == 0)
+            continue;
+
         list_for_each(pos_node_object, &(node_iter->lsa->objects.list)){
             // for every object
             struct str_list* object_iter = list_entry(pos_node_object, struct str_list, list);
+            struct ObjectInfo* local_objects_iter;
             list_for_each(pos_objects, &(rd->objects.list)){
-                struct ObjectInfo* local_objects_iter = list_entry(pos_objects, struct ObjectInfo, list);
+                local_objects_iter = list_entry(pos_objects, struct ObjectInfo, list);
                 if (!strcmp(local_objects_iter->name, object_iter->str)){
                     // object already exists
                     found = 1;
@@ -142,7 +147,7 @@ int calc_OSPF(struct RouteDaemon * rd){
                 // Add node id
                 struct id_list *new_id = (struct id_list*)malloc(sizeof(struct id_list));
                 new_id->id = node_iter->node_id;
-                list_add(&(new_id->list), &(local_objects_iter->id_list.list));
+                list_add(&(new_id->list), &(local_objects_iter->nodes.list));
             }else{
                 // new object
                 struct ObjectInfo * new_obj = (struct ObjectInfo*)malloc(sizeof(struct ObjectInfo));
@@ -150,8 +155,8 @@ int calc_OSPF(struct RouteDaemon * rd){
                 INIT_LIST_HEAD(&(new_obj->nodes.list));
                 struct id_list *first_node = (struct id_list*)malloc(sizeof(struct id_list));
                 first_node->id = node_iter->node_id;
-                list_add(&(first_node->list), &(new_obj->id_list.list));
-                list_add(&(new_obj.list), &(rd->objects.list));
+                list_add(&(first_node->list), &(new_obj->nodes.list));
+                list_add(&(new_obj->list), &(rd->objects.list));
             }
         }
     }
@@ -272,7 +277,6 @@ int handle_LSA(struct RouteDaemon * rd){
             newLSA->type = 0;
         }
 
-        write_log(INFO, "Got LSA from %s:%d", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
         // print_LSA(newLSA);
 
         int node_id = get_id(rd, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
@@ -280,6 +284,9 @@ int handle_LSA(struct RouteDaemon * rd){
             write_log(WARN, "LSA from unknown peer %s:%d", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
             return 0;
         }
+
+        if(newLSA->type == 0)
+            write_log(INFO, "Got LSA from %d(%d) by %d", newLSA->sender_id, newLSA->seq_num, node_id);
 
         // An ACK
         if(newLSA->type == 1){
@@ -328,15 +335,21 @@ int update_LSA(struct RouteDaemon * rd, struct LSA * lsa, int from){
         if(iterator->lsa == NULL || lsa->seq_num > iterator->lsa->seq_num){
             // update lsa
             free_LSA(iterator->lsa);
-            iterator->lsa = lsa;
+            iterator->lsa = dup_LSA(lsa);
+            iterator->lsa->ttl = 32;
             iterator->last_lsa = rd->lsa_timeout;
+            if(lsa->ttl > 0){
+                lsa->ttl -= 1;
+                flood_LSA(rd, lsa, from);
+            }
             // generate shortest path and object table
             calc_OSPF(rd);
         }else{
             if(is_neighbor(rd, lsa->sender_id)){
                 // from neighbor, echo back
-                iterator->lsa->ttl = 32;
+                iterator->lsa->type = 1;
                 send_LSA(rd, iterator->lsa, iterator->hostname, iterator->rport);
+                iterator->lsa->type = 0;
             }
         }
     }else{
@@ -447,6 +460,39 @@ int process_req(struct RouteDaemon * rd, int conn_id){
             }
         }
         ///TODO: look up in remote
+        list_for_each(pos, &(rd->objects.list)){
+            struct ObjectInfo * e = list_entry(pos, struct ObjectInfo, list);
+            if(strcmp(e->name, req->name))
+                continue;
+            int min_dist = -1;
+            char * min_host = NULL;
+            int min_lport = 0;
+            int min_sport = 0;
+            struct list_head * id_pos;
+            list_for_each(id_pos, &(e->nodes.list)){
+                struct id_list * id_e = list_entry(id_pos, struct id_list, list);
+                int node_id = id_e->id;
+                struct list_head * npos;
+                list_for_each(npos, &(rd->nodes.list)){
+                    struct NodeInfo * n = list_entry(npos, struct NodeInfo, list);
+                    if(n->node_id == node_id){
+                        if(min_dist == -1 || min_dist > n->distance){
+                            min_dist = n->distance;
+                            min_host = n->hostname;
+                            min_sport = n->sport;
+                            min_lport = n->lport;
+                        }
+                    }
+                }
+            }
+            if(min_dist != -1){
+                sprintf(b, "http://%s:%d/rd/%d/%s", min_host, min_sport, min_lport, req->name);
+                int len = strlen(b);
+                sprintf(rep, "OK %d %s", len, b);
+                response_cgi(rd, conn_id, rep, strlen(rep));
+                return 0;
+            }            
+        }
 
         sprintf(rep, "NOTFOUND 0");
         response_cgi(rd, conn_id, rep, strlen(rep));
@@ -740,7 +786,7 @@ int get_ack(struct RouteDaemon * rd, struct LSA * lsa, int from){
         list_for_each_safe(apos, q, & (e->ack.list)){
             struct ACKCD * ae = list_entry(apos, struct ACKCD, list);
             if(ae->lsa->sender_id == lsa->sender_id){
-                write_log(INFO, "Got ACK from %d for %d", from, lsa->sender_id);
+                // write_log(INFO, "Got ACK from %d for %d", from, lsa->sender_id);
                 list_del(apos);
                 free_LSA(ae->lsa);
                 free(ae);

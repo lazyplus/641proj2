@@ -7,10 +7,10 @@ import hashlib
 import socket
 import urllib
 import flask
+import re
 
 app = Flask(__name__)
-rd_host = "unix11.andrew.cmu.edu"
-local_port = 5000
+rd_host = "localhost"
 
 def parse(ss):
 	if (ss[0:2] == "OK"):
@@ -28,9 +28,11 @@ def rd_getrd(p):
 	request_obj = request.args.get('object')
 	print "Object:" + request_obj
 	#2. Connect to the routing daemon on port p
-	request_line = "GETRD " + str(len(request_obj)) + " " + request_obj + "\r\n"
+	request_line = "GETRD " + str(len(request_obj)) + " " + request_obj
 	sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 	#sock.setblocking(0)
+	print "local port: " + str(p)
+	local_port = p
 	sock.connect((rd_host, local_port))
 	#print sock
 	#3. Do GETRD <object-name>
@@ -38,19 +40,22 @@ def rd_getrd(p):
 	print "Request: " + request_line
 	#4. Parse the response from the routing daemon
 	rd_response_buff = ""
-	ret = rd_response_buff.find("\r\n")
-	while (ret == -1):
-		recv_buff = sock.recv(1024)
-		rd_response_buff = rd_response_buff + recv_buff
-		ret = rd_response_buff.find("\r\n")
-		if (len(rd_response_buff) > 10*1024):
-			print "No EOF found"
-			exit()
-	rd_response = rd_response_buff[:ret+2]
-	rd_response_buff = rd_response_buff[ret+2:]
+	# ret = rd_response_buff.find("\r\n")
+	# while (ret == -1):
+	recv_buff = sock.recv(1024)
+	print "APP Get " + recv_buff
+	# rd_response_buff = rd_response_buff + recv_buff
+	print recv_buff
+	recv_arr = re.split("\s+", recv_buff)
+	if len(recv_arr) == 2:
+		return "Content not found"
+	rd_response = recv_arr[2]
+	# rd_response = rd_response_buff[:ret+2]
+	# rd_response_buff = rd_response_buff[ret+2:]
 	print rd_response	
 	#rd_response = "OK 25 http://localhost:9999/static/index.html"
-	L = rd_response.split(' ')	
+	# L = rd_response.split(' ')	
+	L = recv_arr
 	if (L[0] == "OK"):
 		print L[2]
 		result = urllib.urlopen(L[2])
@@ -66,13 +71,14 @@ def rd_getrd(p):
 		return "Content not available"
 	#4 a)If response is OK <URL>, the open the URL
 	#4 b) If response is 404, then show that content is not available
-    #### You may factor out things from here and rd_getrd() function and form a separate sub-routine
+	#### You may factor out things from here and rd_getrd() function and form a separate sub-routine
 	
 	#return "Unimplemented"
 
 
 @app.route('/rd/addfile/<int:p>', methods=["POST"])
 def rd_addfile(p):
+	local_port = p
 	#1. Figure out the object-name and the file details/content from the request
 	file_name = request.form.get('object')
 	f = request.files['uploadFile']		
@@ -109,29 +115,35 @@ def rd_addfile(p):
 
 @app.route('/rd/<int:p>/<obj>', methods=["GET"])
 def rd_getrdpeer(p, obj):
-    	#1. Connect to the routing daemon on port p
+	#1. Figure out the <object-name> from the request
+	local_port = p
+	request_obj = obj
+	print "Object:" + request_obj + " port:" + str(p)
+	#2. Connect to the routing daemon on port p
+	request_line = "GETRD " + str(len(request_obj)) + " " + request_obj
 	sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	#sock.setblocking(0)
+	print "Conn: " + rd_host + ":" + str(local_port)
 	sock.connect((rd_host, local_port))
-    	#2. Do GETRD <object-name>
-	request_line = "GETRD " + str(len(obj)) + " " + obj + "\r\n"
+	#print sock
+	#3. Do GETRD <object-name>
 	sock.send(request_line) 
-	print "Request: " + request_line 
-   	 #3. Parse the response from the routing daemon
-    	#3 a) If response is OK <URL>, the open the URL
-    	#3 b) If response is 404, then show that content is  not available
+	print "Request: " + request_line
+	#4. Parse the response from the routing daemon
 	rd_response_buff = ""
-	ret = rd_response_buff.find("\r\n")
-	while (ret == -1):
-		recv_buff = sock.recv(1024)
-		rd_response_buff = rd_response_buff + recv_buff
-		ret = rd_response_buff.find("\r\n")
-		if (len(rd_response_buff) > 10*1024):
-			print "No EOF found"
-			exit()
-	rd_response = rd_response_buff[:ret+2]
-	rd_response_buff = rd_response_buff[ret+2:]
+	# ret = rd_response_buff.find("\r\n")
+	# while (ret == -1):
+	recv_buff = sock.recv(1024)
+	# rd_response_buff = rd_response_buff + recv_buff
+	print recv_buff
+	recv_arr = re.split("\s+", recv_buff)
+	rd_response = recv_arr[2]
+	# rd_response = rd_response_buff[:ret+2]
+	# rd_response_buff = rd_response_buff[ret+2:]
 	print rd_response	
-	L = rd_response.split(' ')	
+	#rd_response = "OK 25 http://localhost:9999/static/index.html"
+	# L = rd_response.split(' ')	
+	L = recv_arr
 	if (L[0] == "OK"):
 		print L[2]
 		result = urllib.urlopen(L[2])

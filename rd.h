@@ -34,6 +34,7 @@ struct LSA{
 struct LSA * unmarshal_LSA(char * buf, int len);
 int marshal_LSA(struct LSA * lsa, char * buf, int len);
 int print_LSA(struct LSA * lsa);
+struct LSA * dup_LSA(struct LSA * lsa);
 void free_LSA(struct LSA * lsa);
 
 struct Request{
