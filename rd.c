@@ -1,3 +1,8 @@
+/*
+ * Route Daemon implementation
+ * by Yu Su <ysu1@andrew.cmu.edu> Hanshi Lei <hanshil@andrew.cmu.edu>
+ */
+
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
@@ -90,8 +95,20 @@ int close_daemon(struct RouteDaemon * rd){
     free(rd->config_file);
     free(rd->file_list);
 
-    ///TODO: free the list of NodeInfo, Objects, Neighbors, LocalObjects
-    ///TODO: close sockets
+    free_objects(&(rd->objects));
+
+    struct list_head * pos, * q;
+    list_for_each_safe(pos, q, &(rd->nodes.list)){
+        struct NodeInfo * n = list_entry(pos, struct NodeInfo, list);
+        if(n->lsa)
+            free_LSA(n->lsa);
+        SAFE_FREE(n->hostname);
+        list_del(pos);
+        free(n);
+    }
+
+    free_id_list(&(rd->neighbors));
+
     free(rd);
     return 0;
 }
@@ -110,14 +127,25 @@ void free_objects(struct ObjectInfo *objects){
     }
 }
 
+void free_local_objects(struct LocalObject *objects){
+    struct list_head *pos, *q;
+    list_for_each_safe(pos, q, &(objects->list)){
+        struct LocalObject *one_object = list_entry(pos, struct LocalObject, list);
+        free(one_object->name);
+        free(one_object->path);
+        list_del(pos);
+        free(one_object);
+    }
+}
+
 // generate the shortest path and object table
 int calc_OSPF(struct RouteDaemon * rd){
     shortest_path(rd);
-    
+
+    // write_log(INFO, "Node %d Generating Object List", rd->node_id);
     struct list_head *pos_node;
     struct list_head *pos_node_object;
     struct list_head *pos_objects;
-    int found=0;
     // delect the old table
     free_objects(&(rd->objects));
     // init the new table
@@ -132,23 +160,21 @@ int calc_OSPF(struct RouteDaemon * rd){
         list_for_each(pos_node_object, &(node_iter->lsa->objects.list)){
             // for every object
             struct str_list* object_iter = list_entry(pos_node_object, struct str_list, list);
-            struct ObjectInfo* local_objects_iter;
+            int found = 0;
             list_for_each(pos_objects, &(rd->objects.list)){
-                local_objects_iter = list_entry(pos_objects, struct ObjectInfo, list);
+                struct ObjectInfo * local_objects_iter = list_entry(pos_objects, struct ObjectInfo, list);
                 if (!strcmp(local_objects_iter->name, object_iter->str)){
                     // object already exists
+                    struct id_list * new_id = (struct id_list*)malloc(sizeof(struct id_list));
+                    new_id->id = node_iter->node_id;
+                    list_add(&(new_id->list), &(local_objects_iter->nodes.list));
                     found = 1;
                     break;
                 }
             }
 
-            if(found == 1){
-                //object already exists
-                // Add node id
-                struct id_list *new_id = (struct id_list*)malloc(sizeof(struct id_list));
-                new_id->id = node_iter->node_id;
-                list_add(&(new_id->list), &(local_objects_iter->nodes.list));
-            }else{
+            if(found == 0){
+                // write_log(INFO, "Adding New Object %s on %d", object_iter->str, node_iter->node_id);
                 // new object
                 struct ObjectInfo * new_obj = (struct ObjectInfo*)malloc(sizeof(struct ObjectInfo));
                 new_obj->name = strdup(object_iter->str);
@@ -313,9 +339,9 @@ int handle_LSA(struct RouteDaemon * rd){
 }
 
 int update_LSA(struct RouteDaemon * rd, struct LSA * lsa, int from){
-    ///TODO: handle new LSA (update or echo-back)
-    ///TODO: update: re-compute shortest path and flood
-    ///TODO: echo-back: send neighbor's last LSA back
+    // handle new LSA (update or echo-back)
+    // update: re-compute shortest path and flood
+    // echo-back: send neighbor's last LSA back
     struct list_head *pos;
     struct NodeInfo *iterator;
     int f_found=0; 
@@ -355,10 +381,12 @@ int update_LSA(struct RouteDaemon * rd, struct LSA * lsa, int from){
     }else{
         // New node, add to the nodes list
         struct NodeInfo *new_node = (struct NodeInfo *)malloc(sizeof(struct NodeInfo));
+        new_node->hostname = NULL;
         new_node->node_id = lsa->sender_id;
         new_node->last_lsa = rd->lsa_timeout;
         new_node->distance = 32;
         new_node->lsa = lsa;
+        new_node->active = 1;
         list_add(&(new_node->list), &(rd->nodes.list));
         // generate shortest path and object table
         calc_OSPF(rd);
@@ -441,6 +469,27 @@ int feed_req(struct Request * req, char * buf, int len){
     return 0;
 }
 
+struct NextHop{
+    int prefix, dist;
+    int next;
+    int lport, sport;
+    int node_id;
+};
+
+int prefix(char * a, char * b, int * prefix){
+    int n = strlen(a);
+    int m = strlen(b);
+    if(n < m && strncmp(a, b, n) == 0 && a[n-1] == '/'){
+        * prefix = n;
+        return 1;
+    }else if(n == m && strcmp(a, b) == 0){
+        * prefix = n;
+        return 1;
+    }
+    * prefix = 0;
+    return 0;
+}
+
 int response_cgi(struct RouteDaemon * rd, int connection_id, char * buf, int len);
 int process_req(struct RouteDaemon * rd, int conn_id){
     static char rep[BUF_SIZE], b[BUF_SIZE];
@@ -459,15 +508,23 @@ int process_req(struct RouteDaemon * rd, int conn_id){
                 return 0;
             }
         }
-        ///TODO: look up in remote
+        ///look up in remote
+        struct NextHop res;
+        res.prefix = 0;
+        res.dist = -1;
+
         list_for_each(pos, &(rd->objects.list)){
             struct ObjectInfo * e = list_entry(pos, struct ObjectInfo, list);
-            if(strcmp(e->name, req->name))
+
+            struct NextHop tmp;
+            tmp.dist = -1;
+            int ret = prefix(e->name, req->name, &tmp.prefix);
+            write_log(INFO, "prefix: %s %s %d %d", e->name, req->name, ret, tmp.prefix);
+            if(!prefix(e->name, req->name, &tmp.prefix))
                 continue;
-            int min_dist = -1;
-            char * min_host = NULL;
-            int min_lport = 0;
-            int min_sport = 0;
+            if(tmp.prefix < res.prefix)
+                continue;
+
             struct list_head * id_pos;
             list_for_each(id_pos, &(e->nodes.list)){
                 struct id_list * id_e = list_entry(id_pos, struct id_list, list);
@@ -476,22 +533,39 @@ int process_req(struct RouteDaemon * rd, int conn_id){
                 list_for_each(npos, &(rd->nodes.list)){
                     struct NodeInfo * n = list_entry(npos, struct NodeInfo, list);
                     if(n->node_id == node_id){
-                        if(min_dist == -1 || min_dist > n->distance){
-                            min_dist = n->distance;
-                            min_host = n->hostname;
-                            min_sport = n->sport;
-                            min_lport = n->lport;
+                        if(tmp.dist == -1 || tmp.dist > n->distance || (tmp.dist == n->distance && n->node_id < tmp.node_id)){
+                            tmp.dist = n->distance;
+                            tmp.next = n->next_hop;
+                            tmp.sport = n->sport;
+                            tmp.lport = n->lport;
+                            tmp.node_id = n->node_id;
                         }
                     }
                 }
             }
-            if(min_dist != -1){
-                sprintf(b, "http://%s:%d/rd/%d/%s", min_host, min_sport, min_lport, req->name);
-                int len = strlen(b);
-                sprintf(rep, "OK %d %s", len, b);
-                response_cgi(rd, conn_id, rep, strlen(rep));
-                return 0;
+
+            if(tmp.dist == -1)
+                continue;
+
+            if(res.dist == -1 || tmp.dist < res.dist || (tmp.dist == res.dist && tmp.node_id < res.node_id)){
+                res = tmp;
             }            
+        }
+
+        write_log(INFO, "res: %d %d", res.next, res.dist);
+
+        if(res.dist != -1){
+            struct list_head * npos;
+            list_for_each(npos, &(rd->nodes.list)){
+                struct NodeInfo * n = list_entry(npos, struct NodeInfo, list);
+                if(n->node_id == res.next){
+                    sprintf(b, "http://%s:%d/rd/%d/%s", n->hostname, n->sport, n->lport, req->name);
+                    int len = strlen(b);
+                    sprintf(rep, "OK %d %s", len, b);
+                    response_cgi(rd, conn_id, rep, strlen(rep));
+                    return 0;
+                }
+            }
         }
 
         sprintf(rep, "NOTFOUND 0");
@@ -626,7 +700,7 @@ int add_neighbor(struct RouteDaemon * rd, char * line){
         ni->rport = rport;
         ni->lport = lport;
         ni->sport = sport;
-        ni->next_hop = rd->node_id;
+        ni->next_hop = id;
         ni->distance = 1;
         ni->active = 1;
         ni->last_lsa = rd->neighbor_timeout;
@@ -780,6 +854,11 @@ int get_ack(struct RouteDaemon * rd, struct LSA * lsa, int from){
     struct list_head * pos;
     list_for_each(pos, & (rd->nodes.list)){
         struct NodeInfo * e = list_entry(pos, struct NodeInfo, list);
+
+        // if(e->node_id == lsa->sender_id){
+        //     e->last_lsa = rd->lsa_timeout;
+        // }
+
         if(e->node_id != from)
             continue;
         struct list_head * apos, * q;

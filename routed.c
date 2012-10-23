@@ -1,6 +1,6 @@
 /*
  * Main routine of route daemon
- * by Yu Su <ysu1@andrew.cmu.edu>
+ * by Yu Su <ysu1@andrew.cmu.edu> Hanshi Lei <hanshil@andrew.cmu.edu>
  */
 
 #include <stdio.h>
@@ -39,44 +39,17 @@ void signal_handler(int sig){
 }
 
 int daemonize(int argc, char ** argv){
-    // int pid = fork();
-    // if(pid < 0){
-    //     write_log(ERROR, "Cannot fork working process");
-    //     return 0;
-    // }
-    // if(pid > 0)
-    //     return 0;
+    int pid = fork();
+    if(pid < 0){
+        write_log(ERROR, "Cannot fork working process");
+        return 0;
+    }
+    if(pid > 0)
+        return 0;
 
-    // setsid();
+    setsid();
 
-    // int log_fd = open(argv[3], O_CREAT | O_RDWR, 0640);
-    // if(log_fd <= 0){
-    //     fprintf(stderr, "Cannot open log file\n");
-    //     return 0;
-    // }
-    // set_log_fd(log_fd);
-
-    // int i;
-    // for (i = getdtablesize(); i>=0; i--)
-    //     if(i != log_fd)
-    //         close(i);
-
-    // i = open("/dev/null", O_RDWR);
-    // dup2(i, STDOUT_FILENO); /* stdout */
-    // dup2(i, STDERR_FILENO); /* stderr */
-    // umask(027);
-
-    // int lfp = open(argv[4], O_RDWR|O_CREAT|O_EXCL, 0640);
-    // if (lfp < 0){
-    //     write_log(ERROR, "Cannot open lock file %s", argv[4]);
-    //     return 0;
-    // }
-
-    // if (lockf(lfp, F_TLOCK, 0) < 0){
-    //     write_log(ERROR, "Cannot lock lock file %s", argv[4]);
-    //     return 0;
-    // }
-
+    // print log on screen
     set_log_fd(1);
 
     signal(SIGCHLD, SIG_IGN); /* child terminate signal */
@@ -85,8 +58,8 @@ int daemonize(int argc, char ** argv){
 
     struct RouteDaemon * rd = get_new_rd(argv);
     daemon_serve(rd, & running);
+    write_log(INFO, "Closing Routing Daemon %p", rd);
     close_daemon(rd);
-    close_log_file();
     return 0;
 }
 

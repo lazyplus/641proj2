@@ -1,9 +1,7 @@
 /*
- * Utilities such as log and read buffer
- * by Yu Su <ysu1@andrew.cmu.edu>
+ * Utilities wrappers for log, read buffer and sockets
+ * by Yu Su <ysu1@andrew.cmu.edu> Hanshi Lei <hanshil@andrew.cmu.edu>
  */
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-
 #include <stdio.h>
 #include <unistd.h>
 #include <stdarg.h>
@@ -83,45 +81,6 @@ int fill_read_buffer(struct ReadBuffer * buf){
 	}
 	buf->cnt += ret;
 	return ret;
-}
-
-int read_line(struct ReadBuffer * rb, char * buf, int buf_cap){
-	int i=0;
-	for(; i<rb->cnt - 1; ++i){
-		if(rb->buf[i] == '\r' && rb->buf[i+1] == '\n'){
-			if(i > buf_cap)
-				return -2;
-			memcpy(buf, rb->buf, (i+2) * sizeof(char));
-			buf[i+2] = 0;
-			int offset = i + 2;
-			memmove(rb->buf, rb->buf + offset, (rb->cnt - offset) * sizeof(char));
-			rb->cnt -= offset;
-			return i+2;
-		}
-	}
-    // a very long line would be cut and returned.
-    if(rb->cnt == BUF_SIZE){
-        int move = BUF_SIZE - 2;
-        if(buf_cap - 1 < move)
-            move = buf_cap - 1;
-
-        memcpy(buf, rb->buf, move * sizeof(char));
-        buf[move] = 0;
-        memmove(rb->buf, rb->buf + move, (BUF_SIZE - move) * sizeof(char));
-        rb->cnt = BUF_SIZE - move;
-        return BUF_SIZE - move;
-    }
-	return 0;
-}
-
-int read_cnt(struct ReadBuffer * rb, char * buf, int buf_cap, int cnt){
-    if(rb->cnt < cnt)
-        cnt = rb->cnt;
-	memcpy(buf, rb->buf, cnt * sizeof(char));
-	buf[cnt] = 0;
-	memmove(rb->buf, rb->buf + cnt, (rb->cnt - cnt) * sizeof(char));
-	rb->cnt -= cnt;
-	return cnt;
 }
 
 int read_token(struct ReadBuffer * rb, char * buf, int buf_cap, int token_mode){

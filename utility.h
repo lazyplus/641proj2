@@ -1,12 +1,13 @@
 /*
  * Utilities such as log and read buffer
- * by Yu Su <ysu1@andrew.cmu.edu>
+ * by Yu Su <ysu1@andrew.cmu.edu> Hanshi Lei <hanshil@andrew.cmu.edu>
  */
 
 #ifndef UTILITY_H
 
 #define UTILITY_H
 
+// linked list from Linux kernel
 #include "list.h"
 
 #define MAX_LOG_LEN 1024

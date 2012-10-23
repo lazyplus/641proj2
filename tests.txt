@@ -1,0 +1,60 @@
+Auto Test Cases:
+
+All requests in one test are pipelined and feed into one routing daemon via the same TCP connection
+
+How to run test
+    Enter each sub folder of test_x, run the test.sh script, if you see the diff output like:
+        Files tmp.res and res are identical
+    This means the test had passed.
+
+test_1:
+    Topology:
+        A--B--C
+    Request:
+        Ask A for files on A
+        Ask A for files on B and C
+        Ask A for files on C
+    Expected Response:
+        URL should be local, on B, on B
+    Test Purpose:
+        Basic routing function, basic shortest path
+
+test_2:
+    Topology:
+        A B C connected to each other
+    Request:
+        Ask A for files on A and B
+        Ask A for files on B and C
+        Ask A for files only on C
+    Expected Response:
+        URL should be local, on B, on C
+    Test Purpose:
+        Shortest path on node_id
+
+test_3:
+    Topology:
+        A--B--C
+    Request:
+        Ask A for files on C
+        Ask A to add a file
+        Ask A for the same file just added
+    Expected Response:
+        URL should be on B first and then local
+    Test Purpose:
+        Simulating cache behavior
+
+test_4:
+    Topology:
+        A--B--C--D
+         \      /
+          \    /
+           \  /
+             E
+    Request:
+        Ask A for files on B
+        Ask A for files on C
+        Ask A for files on D
+    Expected Responses:
+        URL should be on B, B, E
+    Test Purpose:
+        Shortest path algorithm

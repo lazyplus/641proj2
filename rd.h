@@ -1,3 +1,8 @@
+/*
+ * Route daemon header file
+ * by Yu Su <ysu1@andrew.cmu.edu> Hanshi Lei <hanshil@andrew.cmu.edu>
+ */
+
 #ifndef RD_H
 
 #define RD_H
@@ -37,6 +42,7 @@ int print_LSA(struct LSA * lsa);
 struct LSA * dup_LSA(struct LSA * lsa);
 void free_LSA(struct LSA * lsa);
 
+// Data structure for parsing and handing request
 struct Request{
     enum{
         GET,
@@ -58,6 +64,7 @@ struct Request{
 };
 void free_request(struct Request *r);
 
+// Pending LSA waiting for ACK
 struct ACKCD{
     struct LSA * lsa;
     int ack_count_down;
@@ -97,6 +104,7 @@ struct ObjectInfo{
     // linked list
     struct list_head list;
 };
+void free_objects(struct ObjectInfo *objects);
 
 struct LocalObject{
     char * name;
@@ -104,6 +112,7 @@ struct LocalObject{
 
     struct list_head list;
 };
+void free_local_objects(struct LocalObject *objects);
 
 // all info of a routing daemon
 struct RouteDaemon{
