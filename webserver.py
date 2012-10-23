@@ -99,7 +99,7 @@ def rd_addfile(p):
     recv_buff = sock.recv(1024)
     print "APP Get " + recv_buff
     sock.close()
-    if(recev_buff.find("OK") == -1):
+    if(recv_buff.find("OK") == -1):
         return "Add local file failed"
     else:
         return "File added"
