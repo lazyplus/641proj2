@@ -66,6 +66,21 @@ def rd_getrd(p):
 				key = pair[0]
 				value = pair[1]
 				response.headers[key] = value
+                if (string.find(L[2], "http://localhost:") == -1):
+                    # file not exist in local host
+                    file_name = request_obj
+                    file_content = result.read()
+                    local_file = open("static/" + hashlib.sha256(file_name).hexdigest(), "w")
+                    local_file.write(file_content)
+                    local_file.close()
+                    request_line = "ADDFILE " + str(len(file_name)) + " " + file_name + " " + str(len("/static/" + hashlib.sha256(file_name).hexdigest())) + " /static/" + hashlib.sha256(file_name).hexdigest()
+                    sock.send(request_line)
+                    print "Send:" + request_line
+                    sock.recv(1024)
+                    recv_buff = sock.recv(1024)
+	                print "APP Get " + recv_buff
+                    if(recv_buff.find("OK") == -1):
+                        return "Add local file failed"
 		return response
 	else:
 		return "Content not available"
@@ -74,22 +89,7 @@ def rd_getrd(p):
 	#### You may factor out things from here and rd_getrd() function and form a separate sub-routine
 	
 	#return "Unimplemented"
-    if (string.find(L[2], "http://localhost:") == -1):
-        # file not exist in local host
-        file_name = request_obj
-        file_content = result.read()
-        local_file = open("static/" + hashlib.sha256(file_name).hexdigest(), "w")
-        local_file.write(file_content)
-        local_file.close()
-        request_line = "ADDFILE " + str(len(file_name)) + " " + file_name + " " + str(len("/static/" + hashlib.sha256(file_name).hexdigest())) + " /static/" + hashlib.sha256(file_name).hexdigest()
-        sock.send(request_line)
-        print "Send:" + request_line
-        sock.recv(1024)
-        recv_buff = sock.recv(1024)
-	    print "APP Get " + recv_buff
-        if(recv_buff.find("OK") == -1):
-            return "Add local file failed"
-        
+            
 
 @app.route('/rd/addfile/<int:p>', methods=["POST"])
 def rd_addfile(p):
